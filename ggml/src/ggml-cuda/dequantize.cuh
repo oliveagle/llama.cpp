@@ -2,48 +2,22 @@
 
 static __device__ __forceinline__ void dequantize_q1_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
     const block_q1_0 * x = (const block_q1_0 *) vx;
-
     const float d = x[ib].d;
-    const float neg_d = -d;
-
-    const int bit_index_0 = iqs;
-    const int bit_index_1 = iqs + 1;
-
-    const int byte_index_0 = bit_index_0 / 8;
-    const int bit_offset_0 = bit_index_0 % 8;
-
-    const int byte_index_1 = bit_index_1 / 8;
-    const int bit_offset_1 = bit_index_1 % 8;
-
-    // Extract bits: 1 = +d, 0 = -d
-    const uint8_t bit_0 = (x[ib].qs[byte_index_0] >> bit_offset_0) & 1;
-    const uint8_t bit_1 = (x[ib].qs[byte_index_1] >> bit_offset_1) & 1;
-
-    v.x = bit_0 ? d : neg_d;
-    v.y = bit_1 ? d : neg_d;
+    // Q1_0: 32 elements per block, stored as 4 bytes (32 bits)
+    const uint32_t bits = x[ib].qs[0] | (x[ib].qs[1] << 8) | (x[ib].qs[2] << 16) | (x[ib].qs[3] << 24);
+    v.x = (bits & (1u << (iqs*2))) ? d : -d;
+    v.y = (bits & (1u << (iqs*2+1))) ? d : -d;
 }
 
 static __device__ __forceinline__ void dequantize_q1_0_g128(const void * vx, const int64_t ib, const int iqs, float2 & v){
     const block_q1_0_g128 * x = (const block_q1_0_g128 *) vx;
-
     const float d = x[ib].d;
-    const float neg_d = -d;
-
-    const int bit_index_0 = iqs;
-    const int bit_index_1 = iqs + 1;
-
-    const int byte_index_0 = bit_index_0 / 8;
-    const int bit_offset_0 = bit_index_0 % 8;
-
-    const int byte_index_1 = bit_index_1 / 8;
-    const int bit_offset_1 = bit_index_1 % 8;
-
-    // Extract bits: 1 = +d, 0 = -d
-    const uint8_t bit_0 = (x[ib].qs[byte_index_0] >> bit_offset_0) & 1;
-    const uint8_t bit_1 = (x[ib].qs[byte_index_1] >> bit_offset_1) & 1;
-
-    v.x = bit_0 ? d : neg_d;
-    v.y = bit_1 ? d : neg_d;
+    // Q1_0_g128: 128 elements per block, stored as 16 bytes
+    const int byte_idx = iqs / 4;
+    const int bit_start = (iqs % 4) * 2;
+    const uint8_t byte_val = x[ib].qs[byte_idx];
+    v.x = (byte_val & (1u << bit_start)) ? d : -d;
+    v.y = (byte_val & (1u << (bit_start + 1))) ? d : -d;
 }
 
 static __device__ __forceinline__ void dequantize_q4_0(const void * vx, const int64_t ib, const int iqs, float2 & v){

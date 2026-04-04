@@ -5,7 +5,6 @@
 
 static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, const mmq_args & args, cudaStream_t stream) {
     switch (args.type_x) {
-        // TODO: Q1_0/Q1_0_g128 MMQ disabled due to accuracy issues; for now commenting these to use cuBLAS fallback
         case GGML_TYPE_Q1_0:
             mul_mat_q_case<GGML_TYPE_Q1_0>(ctx, args, stream);
             break;
@@ -29,6 +28,9 @@ static void ggml_cuda_mul_mat_q_switch_type(ggml_backend_cuda_context & ctx, con
             break;
         case GGML_TYPE_MXFP4:
             mul_mat_q_case<GGML_TYPE_MXFP4>(ctx, args, stream);
+            break;
+        case GGML_TYPE_NVFP4:
+            mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, args, stream);
             break;
         case GGML_TYPE_Q2_K:
             mul_mat_q_case<GGML_TYPE_Q2_K>(ctx, args, stream);
@@ -274,7 +276,6 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
     bool mmq_supported;
 
     switch (type) {
-        // TODO: Q1_0 and Q1_0_g128 MMQ implementation exists but is currently disabled due to accuracy issues
         case GGML_TYPE_Q1_0:
         case GGML_TYPE_Q1_0_g128:
         case GGML_TYPE_Q4_0:
@@ -283,6 +284,7 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
         case GGML_TYPE_Q5_1:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:
         case GGML_TYPE_Q2_K:
         case GGML_TYPE_Q3_K:
         case GGML_TYPE_Q4_K:
@@ -380,18 +382,16 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11, int64_t
     }
 
     return (!GGML_CUDA_CC_IS_CDNA(cc)) || ne11 < MMQ_DP4A_MAX_BATCH_SIZE;
-
 }
 
 // Check if MMVQ (vec_dot) path should be used for quantized types that cuBLAS doesn't support
 // This is important for Q1_0_g128 on V100 where MMQ is not available but cuBLAS also doesn't support it
 bool ggml_cuda_should_use_mmvq_for_unsupported_type(enum ggml_type type, int cc, int64_t ne11) {
-    // Q1_0_g128 is not supported by cuBLAS, must use MMVQ path
     if (type == GGML_TYPE_Q1_0_g128 || type == GGML_TYPE_Q1_0) {
-        // V100 (Volta) and Pascal support DP4A instructions for vec_dot
         if (ggml_cuda_highest_compiled_arch(cc) >= GGML_CUDA_CC_DP4A) {
             return true;
         }
     }
     return false;
 }
+
