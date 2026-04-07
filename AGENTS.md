@@ -108,3 +108,110 @@ To conserve context space, load these resources as needed:
 - [Jinja engine](common/jinja/README.md)
 - [How to add a new model](docs/development/HOWTO-add-model.md)
 - [PR template](.github/pull_request_template.md)
+
+---
+
+## 开发规范
+
+### ⚠️ 推理演示规范
+
+**禁止使用 `llama-cli` 进行演示和测试！**
+
+**原因**:
+- `llama-cli` 默认进入交互模式，需要手动输入或等待 timeout
+- 每次测试都会浪费大量时间等待超时
+- 不适合自动化测试和脚本化演示
+
+**必须使用 `llama-server` 进行演示**:
+- `llama-server` 提供 HTTP API，可以非交互式调用
+- 适合脚本化测试和自动化演示
+- 可以通过 curl 或编程方式发送请求
+
+**推荐演示脚本**:
+- `server_benchmark.sh` - CPU vs GPU 性能对比（使用 llama-server）
+- `server_demo.sh` - llama-server API 演示
+
+---
+
+## 项目开发记录
+
+### Mac Metal 后端支持 (2026-04-07)
+
+**状态**: ⚠️ **Metal 后端存在问题，需要修复**
+
+**已完成工作**:
+
+1. **Metal Kernel 实现**:
+   - `ggml/src/ggml-metal/ggml-metal.metal`: 添加 `kernel_mul_mv_q1_0_f32` 和 `kernel_mul_mv_q1_0_g128_f32`
+   - `ggml/src/ggml-metal/ggml-metal-device.cpp`: 添加 pipeline 获取逻辑 (mul_mv 和 mul_mv_id)
+   - `ggml/src/ggml-metal/ggml-metal-impl.h`: 定义常量 `N_R0_Q1_0=4`, `N_SG_Q1_0=2`, `N_R0_Q1_0_g128=4`, `N_SG_Q1_0_g128=2`
+
+2. **编译配置**:
+   - 构建目录: `build-metal/`
+   - 编译命令: `cmake -DCMAKE_BUILD_TYPE=Release -DGGML_METAL=ON .. && make`
+   - 输出二进制: `build-metal/bin/llama-cli`, `llama-server`, `llama-quantize`
+
+3. **GPU 信息** (Mac M4):
+   - GPU Family: Apple9 (1009), Common3 (3003), Metal3 (5001)
+   - SIMD reduction: ✅
+   - SIMD matrix mul: ✅
+   - Unified memory: ✅
+   - BFloat support: ✅
+   - Max working set: 22906.50 MB
+
+4. **量化类型支持**:
+   - `Q1_0`: 1.56 bpw binary quantization
+   - `Q1_0_g128`: 1.56 bpw binary quantization (g128)
+
+**⚠️ 已知问题**:
+
+**Metal 后端生成乱码！**
+
+测试结果 (Bonsai-8B.gguf, `2+2=`):
+
+| 后端 | 结果 | 状态 |
+|------|------|------|
+| **CPU** | `4\n- So the answer is 4` | ✅ **正确** |
+| **GPU (Metal)** | `=7)9?0H7+->*49G` | ❌ **乱码** |
+
+**问题分析**:
+- Metal 实现可能影响了其他量化类型的推理
+- 需要检查 Metal shader 修改是否破坏了现有功能
+- 可能是 dequantization 函数或 kernel 实现有误
+
+**推荐推理参数**:
+- Temperature: 0.5 (固定)
+- Top-k: 20 - 40 (默认 20)
+- Top-p: 0.85 - 0.95 (默认 0.9)
+- Repetition penalty: 1.0 (默认)
+- Presence penalty: 0.0 (默认)
+
+**演示命令** (使用 llama-server):
+```bash
+# CPU vs GPU 性能对比
+./server_benchmark_final.sh
+
+# 启动 llama-server (CPU 模式，当前可用)
+./build-metal/bin/llama-server \
+  --model /path/to/model.gguf \
+  --gpu-layers 0 \
+  --temp 0.5 \
+  --host 0.0.0.0 \
+  --port 8080
+
+# 通过 API 发送推理请求
+curl -X POST http://localhost:8080/completion \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "2+2=", "n_predict": 50}'
+
+# 量化到 Q1_0_g128 (当 Metal 修复后)
+./build-metal/bin/llama-quantize \
+  /path/to/model.gguf \
+  /path/to/model-q1_0_g128.gguf \
+  Q1_0_g128
+```
+
+**待提交修改**:
+- ggml/src/ggml-metal/ggml-metal-device.cpp
+- ggml/src/ggml-metal/ggml-metal-impl.h
+- ggml/src/ggml-metal/ggml-metal.metal
