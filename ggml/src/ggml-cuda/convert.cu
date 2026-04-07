@@ -1,5 +1,6 @@
 #include "convert.cuh"
 #include "dequantize.cuh"
+#include "ggml-turbo-quant.h"
 
 #include <cstdint>
 
@@ -760,6 +761,12 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
             return dequantize_row_nvfp4_cuda;
+        case GGML_TYPE_TQ_KV_1B:
+            // TQ_KV_1B requires complex RHT inverse transform, use CPU fallback
+            return nullptr;
+        case GGML_TYPE_TQ_KV_4B_UNIFORM:
+            // TQ_KV_4B_UNIFORM: use CPU fallback for consistency
+            return nullptr;
         case GGML_TYPE_F32:
             return convert_unary_cont_cuda<float>;
         case GGML_TYPE_BF16:
@@ -817,6 +824,12 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
             return dequantize_row_nvfp4_cuda;
+        case GGML_TYPE_TQ_KV_1B:
+            // TQ_KV_1B requires complex RHT inverse transform, use CPU fallback
+            return nullptr;
+        case GGML_TYPE_TQ_KV_4B_UNIFORM:
+            // TQ_KV_4B_UNIFORM: use CPU fallback for consistency
+            return nullptr;
         case GGML_TYPE_F16:
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_BF16:

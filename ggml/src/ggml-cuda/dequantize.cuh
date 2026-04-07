@@ -1,4 +1,5 @@
 #include "common.cuh"
+#include "ggml-turbo-quant.h"
 
 static __device__ __forceinline__ void dequantize_q1_0(const void * vx, const int64_t ib, const int iqs, float2 & v){
     const block_q1_0 * x = (const block_q1_0 *) vx;
@@ -116,4 +117,28 @@ static __device__ __forceinline__ void dequantize_q8_0(const void * vx, const in
 
     v.x *= d;
     v.y *= d;
+}
+
+// TQ_KV_4B_UNIFORM: 4-bit uniform quantization with scale and zero_point
+// Block size = 128, each byte holds 2 x 4-bit values (LSB-first)
+// Reconstruct: x = zero_point + (q + 0.5) * scale
+static __device__ __forceinline__ void dequantize_tq_kv_4b_uniform(const void * vx, const int64_t ib, const int iqs, float2 & v){
+    const block_tq_kv_4b_uniform * x = (const block_tq_kv_4b_uniform *) vx;
+
+    // scale and zero_point are uint16_t storing FP16 bit patterns
+    const float scale   = __half2float(*(const half*)&x[ib].scale);
+    const float zero_pt = __half2float(*(const half*)&x[ib].zero_point);
+
+    // For TQ_KV_4B_UNIFORM:
+    // - qk=128, qr=1, so iqs = (i00 % 128) / 1
+    // - But each byte holds 2 values: qs[i/2] gives the byte for value i
+    // - iqs increments by 2 each iteration (from getrows kernel loop: i00 = 2*(...))
+    const int byte_idx = iqs / 2;
+    const uint8_t vui = x[ib].qs[byte_idx];
+
+    v.x = vui & 0xF;
+    v.y = vui >> 4;
+
+    v.x = zero_pt + (v.x + 0.5f) * scale;
+    v.y = zero_pt + (v.y + 0.5f) * scale;
 }

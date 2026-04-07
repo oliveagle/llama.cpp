@@ -1,5 +1,6 @@
 #include "set-rows.cuh"
 #include "cpy-utils.cuh"
+#include "ggml-turbo-quant.h"
 
 typedef void (*set_rows_kernel_t)(const char * src, char * dst);
 
@@ -309,6 +310,125 @@ static void set_rows_cuda(ggml_backend_cuda_context & ctx, const ggml_tensor * s
             nb1, nb2, nb3,
             stream
         );
+    } else if (dst->type == GGML_TYPE_TQ_KV_1B || dst->type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
+        // TQ_KV types: CPU-based quantization fallback
+        const size_t block_size = dst->type == GGML_TYPE_TQ_KV_1B ? TQ_KV_1B_BLOCK_SIZE : TQ_KV_4B_UNIFORM_BLOCK_SIZE;
+
+        // Check if ne00 is divisible by block_size
+        // If not, we need to handle partial blocks at the end
+        const bool has_partial_block = (ne00 % block_size != 0);
+
+        const size_t src0_size = ne00 * ne01 * ne02 * ne03 * sizeof(float);
+        const size_t dst_size = ggml_nbytes(dst);
+        const int64_t n_blocks_per_row = (ne00 + block_size - 1) / block_size;  // Ceiling division for partial blocks
+
+        // Allocate host memory for source data and row indices
+        float* src_host = nullptr;
+        idx_t* row_indices_host = nullptr;
+
+        // First try cudaMallocHost for pinned memory, fallback to regular malloc
+        cudaError_t err1 = cudaMallocHost(&src_host, src0_size);
+        cudaError_t err2 = cudaSuccess;
+
+        if (err1 != cudaSuccess || src_host == nullptr) {
+            if (src_host) cudaFreeHost(src_host);
+            src_host = (float*)malloc(src0_size);
+            if (!src_host) {
+                GGML_ABORT("Failed to allocate host memory for TQ_KV set_rows (src)");
+            }
+        }
+
+        const int64_t n_rows = ne01 * ne02 * ne03;
+        err2 = cudaMallocHost(&row_indices_host, n_rows * sizeof(idx_t));
+        if (err2 != cudaSuccess || row_indices_host == nullptr) {
+            if (row_indices_host) cudaFreeHost(row_indices_host);
+            row_indices_host = (idx_t*)malloc(n_rows * sizeof(idx_t));
+            if (!row_indices_host) {
+                if (err1 == cudaSuccess) cudaFreeHost(src_host);
+                else free(src_host);
+                GGML_ABORT("Failed to allocate host memory for TQ_KV set_rows (row_indices)");
+            }
+        }
+
+        // Copy source data and row indices from device to host
+        err1 = cudaMemcpy(src_host, src0_d, src0_size, cudaMemcpyDeviceToHost);
+        if (err1 != cudaSuccess) {
+            GGML_ABORT("cudaMemcpy DeviceToHost failed for TQ_KV set_rows (src): %s", cudaGetErrorString(err1));
+        }
+
+        err2 = cudaMemcpy(row_indices_host, src1_d, n_rows * sizeof(idx_t), cudaMemcpyDeviceToHost);
+        if (err2 != cudaSuccess) {
+            GGML_ABORT("cudaMemcpy DeviceToHost failed for TQ_KV set_rows (row_indices): %s", cudaGetErrorString(err2));
+        }
+
+        // Calculate strides
+        const int64_t s01 = nb01 / sizeof(float);
+        const int64_t s02 = nb02 / sizeof(float);
+        const int64_t s03 = nb03 / sizeof(float);
+        const int64_t s10 = nb10 / sizeof(idx_t);
+        const int64_t s11 = nb11 / sizeof(idx_t);
+        const int64_t s12 = nb12 / sizeof(idx_t);
+        const int64_t s1  = nb1;
+        const int64_t s2  = nb2;
+        const int64_t s3  = nb3;
+
+        // Allocate temporary dst buffer
+        char* dst_host = (char*)malloc(dst_size);
+        if (!dst_host) {
+            GGML_ABORT("Failed to allocate host memory for TQ_KV set_rows (dst)");
+        }
+
+        // Copy existing dst data to host
+        err1 = cudaMemcpy(dst_host, dst->data, dst_size, cudaMemcpyDeviceToHost);
+        if (err1 != cudaSuccess) {
+            free(dst_host);
+            GGML_ABORT("cudaMemcpy DeviceToHost failed for TQ_KV set_rows (dst): %s", cudaGetErrorString(err1));
+        }
+
+        // Quantize each row
+        for (int64_t i3 = 0; i3 < ne03; i3++) {
+            for (int64_t i2 = 0; i2 < ne02; i2++) {
+                for (int64_t i1 = 0; i1 < ne01; i1++) {
+                    const int64_t src_row_idx = i1;
+                    const int64_t dst_row_idx = row_indices_host[src_row_idx * s10];
+
+                    const float * src_row = src_host + i1*s01 + i2*s02 + i3*s03;
+                    char * dst_row = dst_host + dst_row_idx*s1 + i2*s2 + i3*s3;
+
+                    if (dst->type == GGML_TYPE_TQ_KV_1B) {
+                        for (int64_t i0 = 0; i0 < ne00; i0 += block_size) {
+                            const int64_t remaining = ne00 - i0;
+                            const int64_t current_block_size = remaining >= block_size ? block_size : remaining;
+                            const float * src_block = src_row + i0;
+                            block_tq_kv_1b * dst_block = (block_tq_kv_1b*)(dst_row + (i0 / block_size) * sizeof(block_tq_kv_1b));
+                            quantize_row_tq_kv_1b_ref(src_block, dst_block, current_block_size);
+                        }
+                    } else {
+                        for (int64_t i0 = 0; i0 < ne00; i0 += block_size) {
+                            const int64_t remaining = ne00 - i0;
+                            const int64_t current_block_size = remaining >= block_size ? block_size : remaining;
+                            const float * src_block = src_row + i0;
+                            block_tq_kv_4b_uniform * dst_block = (block_tq_kv_4b_uniform*)(dst_row + (i0 / block_size) * sizeof(block_tq_kv_4b_uniform));
+                            quantize_row_tq_kv_4b_uniform_ref(src_block, dst_block, current_block_size);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Copy result back to device
+        err1 = cudaMemcpy(dst->data, dst_host, dst_size, cudaMemcpyHostToDevice);
+        if (err1 != cudaSuccess) {
+            free(dst_host);
+            GGML_ABORT("cudaMemcpy HostToDevice failed for TQ_KV set_rows: %s", cudaGetErrorString(err1));
+        }
+
+        // Free memory
+        free(dst_host);
+        if (err2 == cudaSuccess) cudaFreeHost(row_indices_host);
+        else free(row_indices_host);
+        if (err1 == cudaSuccess) cudaFreeHost(src_host);
+        else free(src_host);
     } else {
         GGML_ABORT("unsupported type %s", ggml_type_name(dst->type));
     }

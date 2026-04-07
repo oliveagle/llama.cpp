@@ -370,6 +370,11 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
+    // TQ_KV_4B_UNIFORM does not have FA kernel support, use CPU fallback
+    if (K->type == GGML_TYPE_TQ_KV_4B_UNIFORM || V->type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
+        return BEST_FATTN_KERNEL_NONE;
+    }
+
     switch (K->type) {
         case GGML_TYPE_F32:
         case GGML_TYPE_F16:

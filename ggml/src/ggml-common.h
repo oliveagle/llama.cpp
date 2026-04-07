@@ -170,6 +170,15 @@ typedef sycl::half2 ggml_half2;
 #define QI1_0_g128 (QK1_0_g128 / 32)
 #define QR1_0_g128 1
 
+// TQ_KV_1B and TQ_KV_4B_UNIFORM from quant.cpp
+#define QK_TQ_KV_1B         128
+#define QI_TQ_KV_1B         (QK_TQ_KV_1B / 32)
+#define QR_TQ_KV_1B         1
+
+#define QK_TQ_KV_4B_UNIFORM 128
+#define QI_TQ_KV_4B_UNIFORM (QK_TQ_KV_4B_UNIFORM / (4 * 2))
+#define QR_TQ_KV_4B_UNIFORM 2
+
 #endif // GGML_COMMON_DECL_CUDA || GGML_COMMON_DECL_HIP
 
 #ifdef _MSC_VER

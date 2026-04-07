@@ -392,6 +392,15 @@ bool ggml_cuda_should_use_mmvq_for_unsupported_type(enum ggml_type type, int cc,
             return true;
         }
     }
+    // TQ_KV_1B: Uses dequantize-based vec_dot on CPU, not MMVQ
+    // TQ_KV_1B requires RHT (Random Hadamard Transform) which is complex for GPU
+    if (type == GGML_TYPE_TQ_KV_1B) {
+        return false;
+    }
+    // TQ_KV_4B_UNIFORM: Uses dequantize-based vec_dot on CPU fallback
+    if (type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
+        return false;
+    }
     return false;
 }
 

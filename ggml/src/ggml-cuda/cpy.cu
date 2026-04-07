@@ -407,7 +407,16 @@ void ggml_cuda_cpy(ggml_backend_cuda_context & ctx, const ggml_tensor * src0, gg
     const bool can_be_transposed = nb01 == (int64_t)ggml_element_size(src0) &&
         src0->ne[3] == 1 && nb02 == ne00 * ne01 * (int64_t)ggml_element_size(src0);
 
-    if (src0->type == src1->type && contiguous_srcs) {
+    if (src0->type == src1->type &&
+        (src0->type == GGML_TYPE_TQ_KV_1B || src0->type == GGML_TYPE_TQ_KV_4B_UNIFORM)) {
+        // TQ_KV same-type copy: use raw memcpy if possible, else skip this branch
+        // This will fall through to regular scalar copy path
+        if (contiguous_srcs) {
+            CUDA_CHECK(cudaMemcpyAsync(src1_ddc, src0_ddc, ggml_nbytes(src0), cudaMemcpyDeviceToDevice, main_stream));
+            return;
+        }
+        // For non-contiguous case, fall through to use the existing scalar copy code
+    } else if (src0->type == src1->type && contiguous_srcs) {
         GGML_ASSERT(ggml_nbytes(src0) == ggml_nbytes(src1));
 #if defined(GGML_USE_MUSA) && defined(GGML_MUSA_MUDNN_COPY)
         if (src0->type == GGML_TYPE_F32 || src0->type == GGML_TYPE_F16) {

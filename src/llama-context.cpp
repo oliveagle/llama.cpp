@@ -348,7 +348,11 @@ llama_context::llama_context(
 
         if (!cparams.flash_attn) {
             if (ggml_is_quantized(params.type_v)) {
-                throw std::runtime_error("quantized V cache was requested, but this requires Flash Attention");
+                // TQ_KV types have CPU dequantize fallback, so they can work without FA
+                if (params.type_v != GGML_TYPE_TQ_KV_1B && params.type_v != GGML_TYPE_TQ_KV_4B_UNIFORM) {
+                    throw std::runtime_error("quantized V cache was requested, but this requires Flash Attention");
+                }
+                LLAMA_LOG_WARN("%s: V cache quantization without flash_attn, using CPU fallback (slow)\n", __func__);
             }
         }
     }
@@ -2943,30 +2947,40 @@ llama_context * llama_init_from_model(
     }
 
     if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO && ggml_is_quantized(params.type_k)) {
-        const uint32_t blck_size = ggml_blck_size(params.type_k);
-        for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
-            if (model->hparams.n_embd_head_k(il) % blck_size != 0) {
-                LLAMA_LOG_ERROR("%s: K cache type %s with block size %u does not divide n_embd_head_k=%u\n",
-                    __func__, ggml_type_name(params.type_k), blck_size, model->hparams.n_embd_head_k(il));
-                return nullptr;
+        // Skip check for TQ_KV types - they have CPU fallback
+        if (params.type_k != GGML_TYPE_TQ_KV_1B && params.type_k != GGML_TYPE_TQ_KV_4B_UNIFORM) {
+            const uint32_t blck_size = ggml_blck_size(params.type_k);
+            for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
+                if (model->hparams.n_embd_head_k(il) % blck_size != 0) {
+                    LLAMA_LOG_ERROR("%s: K cache type %s with block size %u does not divide n_embd_head_k=%u\n",
+                        __func__, ggml_type_name(params.type_k), blck_size, model->hparams.n_embd_head_k(il));
+                    return nullptr;
+                }
             }
         }
     }
 
     if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO && ggml_is_quantized(params.type_v)) {
-        const uint32_t blck_size = ggml_blck_size(params.type_v);
-        for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
-            if (model->hparams.n_embd_head_v(il) % blck_size != 0) {
-                LLAMA_LOG_ERROR("%s: V cache type %s with block size %u does not divide n_embd_head_v=%u\n",
-                    __func__, ggml_type_name(params.type_v), blck_size, model->hparams.n_embd_head_v(il));
-                return nullptr;
+        // Skip check for TQ_KV types - they have CPU fallback
+        if (params.type_v != GGML_TYPE_TQ_KV_1B && params.type_v != GGML_TYPE_TQ_KV_4B_UNIFORM) {
+            const uint32_t blck_size = ggml_blck_size(params.type_v);
+            for (uint32_t il = 0; il < model->hparams.n_layer; ++il) {
+                if (model->hparams.n_embd_head_v(il) % blck_size != 0) {
+                    LLAMA_LOG_ERROR("%s: V cache type %s with block size %u does not divide n_embd_head_v=%u\n",
+                        __func__, ggml_type_name(params.type_v), blck_size, model->hparams.n_embd_head_v(il));
+                    return nullptr;
+                }
             }
         }
     }
 
     if (ggml_is_quantized(params.type_v) && params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
-        LLAMA_LOG_ERROR("%s: V cache quantization requires flash_attn\n", __func__);
-        return nullptr;
+        // TQ_KV types have CPU dequantize fallback, so they can work without FA
+        if (params.type_v != GGML_TYPE_TQ_KV_1B && params.type_v != GGML_TYPE_TQ_KV_4B_UNIFORM) {
+            LLAMA_LOG_ERROR("%s: V cache quantization requires flash_attn\n", __func__);
+            return nullptr;
+        }
+        LLAMA_LOG_WARN("%s: V cache quantization without flash_attn, using CPU fallback (slow)\n", __func__);
     }
 
     if (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED &&

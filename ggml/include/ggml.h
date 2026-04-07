@@ -430,7 +430,9 @@ extern "C" {
         GGML_TYPE_NVFP4      = 40, // NVFP4 (4 blocks, E4M3 scale)
         GGML_TYPE_Q1_0_g128  = 41,
         GGML_TYPE_Q1_0       = 42,
-        GGML_TYPE_COUNT      = 43,
+        GGML_TYPE_TQ_KV_1B   = 43,   /* quant.cpp 1-bit KV cache (24 bytes / 128 elements) */
+        GGML_TYPE_TQ_KV_4B_UNIFORM = 44,   /* quant.cpp Uniform 4-bit KV cache (68 bytes / 128 elements) */
+        GGML_TYPE_COUNT      = 45,
     };
 
     // precision

@@ -3,6 +3,7 @@
 #include "common.cuh"
 #include "convert.cuh"
 #include "vecdotq.cuh"
+#include "ggml-turbo-quant.h"
 
 #include <cstdint>
 
