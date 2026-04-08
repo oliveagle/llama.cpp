@@ -289,6 +289,49 @@ static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_q8_0(
     return sum;
 }
 
+// TQ_KV_4B_UNIFORM: 4-bit uniform quantization vec_dot for K cache
+template<int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tq_kv_4b_uniform(
+    const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8, const void * __restrict__ Q_ds_v) {
+
+    const block_tq_kv_4b_uniform * K_tq = (const block_tq_kv_4b_uniform *) K_c;
+    GGML_UNUSED(Q_v);
+
+    float sum = 0.0f;
+
+#pragma unroll
+    for (int k_KQ_0 = 0; k_KQ_0 < int(D/sizeof(int)); k_KQ_0 += nthreads) {
+        const int k_KQ = k_KQ_0 + (nthreads == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads);
+
+        const int ib    = k_KQ /  QI_TQ_KV_4B_UNIFORM;
+        const int iqs4  = k_KQ %  QI_TQ_KV_4B_UNIFORM;
+        const int shift = k_KQ & ((QI_TQ_KV_4B_UNIFORM/2)-1);
+
+        int v;
+        ggml_cuda_memcpy_1<sizeof(int), 2>(&v, K_tq[ib].qs + sizeof(int)*iqs4);
+        v = (v >> (4*shift)) & 0x0F0F0F0F;
+
+        const int u = Q_q8[k_KQ_0/nthreads];
+
+        const int sumi = ggml_cuda_dp4a(v, u, 0);
+
+        const float2 Q_ds = ((const float2 *) Q_ds_v)[k_KQ_0/nthreads];
+
+        // scale and zero_point are uint16_t storing FP16 bit patterns
+        const float scale = __half2float(*(const half*)&K_tq[ib].scale);
+        const float zero_pt = __half2float(*(const half*)&K_tq[ib].zero_point);
+
+        // Reconstruct: x = zero_pt + (q + 0.5) * scale
+        // Dot product: sum(q_i * Q_ds.x) = sum((q_i + 0.5) * Q_ds.x) - sum(0.5 * Q_ds.x)
+        // = (sumi * Q_ds.x) - (8/QI_TQ_KV_4B_UNIFORM) * Q_ds.x
+        // Then multiply by scale, plus zero_pt * sum(Q_ds.x)
+        sum += scale * (sumi * Q_ds.x - (8.0f / QI_TQ_KV_4B_UNIFORM) * Q_ds.x)
+               + zero_pt * Q_ds.x;
+    }
+
+    return sum;
+}
+
 template <typename Tds, int ni>
 static __device__ __forceinline__ void quantize_q8_1_to_shared(
     const float * __restrict__ x, const float scale, int * __restrict__ yq32, void * __restrict__ yds) {
@@ -578,6 +621,53 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     }
 }
 
+// TQ_KV_4B_UNIFORM: 4-bit uniform quantization with FP16 scale and zero_point
+// Block size = 128, reconstruct: x = zero_point + (q + 0.5) * scale
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_tq_kv_4b_uniform(const void * __restrict__ vx, void * __restrict__ dst, const int64_t i0) {
+    const block_tq_kv_4b_uniform * x = (const block_tq_kv_4b_uniform *) vx;
+
+    const int64_t ib    =  i0          /  QK_TQ_KV_4B_UNIFORM;
+    const int     iqs   =  i0          % (QK_TQ_KV_4B_UNIFORM/2);
+    const int     shift = (i0 % QK_TQ_KV_4B_UNIFORM) / (QK_TQ_KV_4B_UNIFORM/2);
+
+    int q;
+    static_assert(ne == 2 || ne == 4, "bad ne");
+    ggml_cuda_memcpy_1<ne, 2>(&q, x[ib].qs + iqs);
+    q >>= 4*shift;
+    q &= 0x0F0F0F0F;
+
+    const int8_t * q8 = (const int8_t *) &q;
+
+    // scale and zero_point are uint16_t storing FP16 bit patterns
+    const half scale_h  = *(const half*)&x[ib].scale;
+    const half zero_h   = *(const half*)&x[ib].zero_point;
+
+#ifdef FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, half>) {
+        const half2 scale2 = __half2half2(scale_h);
+        const half2 zero2  = __half2half2(zero_h);
+
+#pragma unroll
+        for (int l0 = 0; l0 < ne; l0 += 2) {
+            const half2 qval = make_half2(q8[l0 + 0] + 0.5f, q8[l0 + 1] + 0.5f);
+            ((half2 *) dst)[l0/2] = zero2 + scale2 * qval;
+        }
+    } else
+#endif // FP16_AVAILABLE
+    if constexpr (std::is_same_v<T, float>) {
+        const float scale   = __half2float(scale_h);
+        const float zero_pt = __half2float(zero_h);
+
+#pragma unroll
+        for (int l = 0; l < ne; ++l) {
+            ((float *) dst)[l] = zero_pt + (q8[l] + 0.5f) * scale;
+        }
+    } else {
+        static_assert(std::is_same_v<T, void>, "bad type");
+    }
+}
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -594,6 +684,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
+    } else if constexpr (type_K == GGML_TYPE_TQ_KV_4B_UNIFORM) {
+        return vec_dot_fattn_vec_KQ_tq_kv_4b_uniform<D, nthreads>;
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
@@ -616,6 +708,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q8_0<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
+    } else if constexpr (type_V == GGML_TYPE_TQ_KV_4B_UNIFORM) {
+        return dequantize_V_tq_kv_4b_uniform<T, ne>;
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;

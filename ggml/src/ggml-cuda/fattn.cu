@@ -282,6 +282,10 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_Q8_0)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
+    // TQ_KV_4B_UNIFORM 支持
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_TQ_KV_4B_UNIFORM)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ_KV_4B_UNIFORM, GGML_TYPE_F16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ_KV_4B_UNIFORM, GGML_TYPE_TQ_KV_4B_UNIFORM)
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
     GGML_ABORT("fatal error");
@@ -365,15 +369,13 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
 #ifndef GGML_CUDA_FA_ALL_QUANTS
-    if (K->type != V->type) {
+    // 允许 TQ_KV_4B_UNIFORM 与其他类型组合
+    if (K->type != V->type &&
+        K->type != GGML_TYPE_TQ_KV_4B_UNIFORM &&
+        V->type != GGML_TYPE_TQ_KV_4B_UNIFORM) {
         return BEST_FATTN_KERNEL_NONE;
     }
 #endif // GGML_CUDA_FA_ALL_QUANTS
-
-    // TQ_KV_4B_UNIFORM does not have FA kernel support, use CPU fallback
-    if (K->type == GGML_TYPE_TQ_KV_4B_UNIFORM || V->type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
-        return BEST_FATTN_KERNEL_NONE;
-    }
 
     switch (K->type) {
         case GGML_TYPE_F32:
@@ -388,6 +390,7 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_BF16:
+        case GGML_TYPE_TQ_KV_4B_UNIFORM:
             break;
         default:
             return BEST_FATTN_KERNEL_NONE;
@@ -430,6 +433,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         const int ncols2_max = Q->ne[0] == 576 ? 16 : 8;
         while (gqa_ratio % (2*gqa_ratio_eff) == 0 && gqa_ratio_eff < ncols2_max) {
             gqa_ratio_eff *= 2;
+        }
+        // TQ_KV_4B_UNIFORM: 暂不支持 Flash Attention，回退到 CPU dequantize
+        if (K->type == GGML_TYPE_TQ_KV_4B_UNIFORM || V->type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
+            return BEST_FATTN_KERNEL_NONE;
         }
         if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
             return BEST_FATTN_KERNEL_VEC;
@@ -498,6 +505,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
                 return BEST_FATTN_KERNEL_VEC;
             }
         }
+    }
+    // TQ_KV_4B_UNIFORM: 对于非 Volta 架构，暂不支持 Flash Attention，回退到 CPU dequantize
+    if (K->type == GGML_TYPE_TQ_KV_4B_UNIFORM || V->type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
+        return BEST_FATTN_KERNEL_NONE;
     }
     return BEST_FATTN_KERNEL_TILE;
 }
