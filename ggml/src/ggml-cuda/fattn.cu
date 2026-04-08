@@ -434,8 +434,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         while (gqa_ratio % (2*gqa_ratio_eff) == 0 && gqa_ratio_eff < ncols2_max) {
             gqa_ratio_eff *= 2;
         }
-        // TQ_KV_4B_UNIFORM: 暂不支持 Flash Attention，回退到 CPU dequantize
+        // TQ_KV_4B_UNIFORM: 支持 vector kernel（已实现 dequantize + vec_dot）
+        // 但不支持 tile/MMA kernel（需要完整 FP16 tensor core 支持）
         if (K->type == GGML_TYPE_TQ_KV_4B_UNIFORM || V->type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
+            if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
+                return BEST_FATTN_KERNEL_VEC;
+            }
             return BEST_FATTN_KERNEL_NONE;
         }
         if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
@@ -506,8 +510,22 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             }
         }
     }
-    // TQ_KV_4B_UNIFORM: 对于非 Volta 架构，暂不支持 Flash Attention，回退到 CPU dequantize
+    // TQ_KV_4B_UNIFORM: 支持 vector kernel（已实现 dequantize + vec_dot）
+    // 但不支持 tile kernel（需要完整 FP16 tensor core 支持）
     if (K->type == GGML_TYPE_TQ_KV_4B_UNIFORM || V->type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
+        if (can_use_vector_kernel) {
+            if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
+                if (Q->ne[1] == 1) {
+                    if (!gqa_opt_applies) {
+                        return BEST_FATTN_KERNEL_VEC;
+                    }
+                }
+            } else {
+                if (Q->ne[1] <= 2) {
+                    return BEST_FATTN_KERNEL_VEC;
+                }
+            }
+        }
         return BEST_FATTN_KERNEL_NONE;
     }
     return BEST_FATTN_KERNEL_TILE;
