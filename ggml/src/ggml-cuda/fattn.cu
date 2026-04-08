@@ -277,6 +277,11 @@ static void ggml_cuda_flash_attn_ext_vec(ggml_backend_cuda_context & ctx, ggml_t
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q5_1, GGML_TYPE_BF16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q8_0, GGML_TYPE_BF16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_BF16, GGML_TYPE_BF16)
+
+    // TQ_KV_4B_UNIFORM support
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,              GGML_TYPE_TQ_KV_4B_UNIFORM)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ_KV_4B_UNIFORM, GGML_TYPE_F16)
+    FATTN_VEC_CASES_ALL_D(GGML_TYPE_TQ_KV_4B_UNIFORM, GGML_TYPE_TQ_KV_4B_UNIFORM)
 #else
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_F16,  GGML_TYPE_F16)
     FATTN_VEC_CASES_ALL_D(GGML_TYPE_Q4_0, GGML_TYPE_Q4_0)
@@ -403,6 +408,11 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
     const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && K->ne[1] % FATTN_KQ_STRIDE == 0;
 
+    // TQ_KV_4B_UNIFORM: only vector kernel supports dequant, relax the FATTN_KQ_STRIDE alignment requirement
+    // because the alternative (NONE) causes ABORT. Vector kernel does not depend on FATTN_KQ_STRIDE.
+    const bool is_tq_kv_4b = K->type == GGML_TYPE_TQ_KV_4B_UNIFORM || V->type == GGML_TYPE_TQ_KV_4B_UNIFORM;
+    const bool can_use_vector_kernel_tq = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0;
+
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
         if (can_use_vector_kernel) {
@@ -436,8 +446,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         }
         // TQ_KV_4B_UNIFORM: 支持 vector kernel（已实现 dequantize + vec_dot）
         // 但不支持 tile/MMA kernel（需要完整 FP16 tensor core 支持）
-        if (K->type == GGML_TYPE_TQ_KV_4B_UNIFORM || V->type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
-            if (can_use_vector_kernel && Q->ne[1] * gqa_ratio_eff <= 2) {
+        // 放宽条件：vector kernel 再慢也比 CPU fallback 快几十倍
+        if (is_tq_kv_4b) {
+            if (can_use_vector_kernel_tq) {
                 return BEST_FATTN_KERNEL_VEC;
             }
             return BEST_FATTN_KERNEL_NONE;
@@ -512,19 +523,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
     // TQ_KV_4B_UNIFORM: 支持 vector kernel（已实现 dequantize + vec_dot）
     // 但不支持 tile kernel（需要完整 FP16 tensor core 支持）
-    if (K->type == GGML_TYPE_TQ_KV_4B_UNIFORM || V->type == GGML_TYPE_TQ_KV_4B_UNIFORM) {
-        if (can_use_vector_kernel) {
-            if (!ggml_is_quantized(K->type) && !ggml_is_quantized(V->type)) {
-                if (Q->ne[1] == 1) {
-                    if (!gqa_opt_applies) {
-                        return BEST_FATTN_KERNEL_VEC;
-                    }
-                }
-            } else {
-                if (Q->ne[1] <= 2) {
-                    return BEST_FATTN_KERNEL_VEC;
-                }
-            }
+    // 放宽条件：vector kernel 再慢也比 CPU fallback 快几十倍
+    if (is_tq_kv_4b) {
+        if (can_use_vector_kernel_tq) {
+            return BEST_FATTN_KERNEL_VEC;
         }
         return BEST_FATTN_KERNEL_NONE;
     }
