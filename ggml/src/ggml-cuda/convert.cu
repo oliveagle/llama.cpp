@@ -6,6 +6,84 @@
 
 #define CUDA_Q8_0_NE_ALIGN 2048
 
+// TQ_KV_4B_UNIFORM: Custom dequantize kernel for FP16 conversion
+// Block structure: 2B scale (FP16) + 2B zero_point (FP16) + 64B qs = 68 bytes per 128 elements
+// Each byte holds 2 x 4-bit values, reconstruct: x = zero_pt + (q + 0.5f) * scale
+template<typename dst_t>
+static __global__ void dequantize_block_tq_kv_4b_uniform(const void * __restrict__ vx, dst_t * __restrict__ y,
+        const int64_t ne00, const int64_t ne01,
+        const int64_t ne0203, const uint3 ne02,
+        const int64_t s01, const int64_t s02, const int64_t s03) {
+    const int64_t i00 = 2 * (int64_t(blockDim.x)*blockIdx.x + threadIdx.x);
+
+    if (i00 >= ne00) {
+        return;
+    }
+
+    for (int64_t i01 = blockIdx.y; i01 < ne01; i01 += gridDim.y) {
+        for (int64_t i0203 = blockIdx.z; i0203 < ne0203; i0203 += gridDim.z) {
+            const uint2 dm = fast_div_modulo((uint32_t)i0203, ne02);
+            const int64_t i02 = dm.y;
+            const int64_t i03 = dm.x;
+
+            const int64_t ibx0 = i03*s03 + i02*s02 + i01*s01;
+
+            const int64_t ib = ibx0 + i00/QK_TQ_KV_4B_UNIFORM; // block index
+            const int64_t iybs = i00 - i00%QK_TQ_KV_4B_UNIFORM; // y block start index
+
+            const block_tq_kv_4b_uniform * x = (const block_tq_kv_4b_uniform *) vx;
+
+            // Load scale and zero_point (stored as FP16 bit patterns)
+            const float scale   = __half2float(*(const half*)&x[ib].scale);
+            const float zero_pt = __half2float(*(const half*)&x[ib].zero_point);
+
+            // Each byte holds 2 x 4-bit values
+            const int byte_idx = (i00 % QK_TQ_KV_4B_UNIFORM) / 2;
+            const uint8_t vui = x[ib].qs[byte_idx];
+
+            // Extract 4-bit values and dequantize
+            const float v0 = zero_pt + ((vui & 0xF) + 0.5f) * scale;
+            const float v1 = zero_pt + ((vui >> 4) + 0.5f) * scale;
+
+            const int64_t iy0 = (i0203*ne01 + i01)*ne00 + iybs + byte_idx * 2;
+            y[iy0 + 0] = ggml_cuda_cast<dst_t>(v0);
+            y[iy0 + 1] = ggml_cuda_cast<dst_t>(v1);
+        }
+    }
+}
+
+template<typename dst_t>
+static void dequantize_row_tq_kv_4b_uniform_cuda(const void * vx, dst_t * y, const int64_t k, cudaStream_t stream) {
+    const int64_t nb = k / QK_TQ_KV_4B_UNIFORM;
+    const dim3 num_blocks((k + 2*CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / (2*CUDA_DEQUANTIZE_BLOCK_SIZE), 1, 1);
+    const uint3 ne02_fdv = init_fastdiv_values(1);
+    dequantize_block_tq_kv_4b_uniform<dst_t><<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>
+        (vx, y, k, 1, 1, ne02_fdv, nb, nb, nb);
+}
+
+static void dequantize_row_tq_kv_4b_uniform_f16_cuda(const void * vx, half * y, int64_t k, cudaStream_t stream) {
+    dequantize_row_tq_kv_4b_uniform_cuda<half>(vx, y, k, stream);
+}
+
+template<typename dst_t>
+static void dequantize_block_tq_kv_4b_uniform_nc(const void * vx, dst_t * y,
+        const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
+        const int64_t s01, const int64_t s02, const int64_t s03, cudaStream_t stream) {
+    const int64_t ne0203 = ne02*ne03;
+    const uint3 ne02_fdv = init_fastdiv_values(ne02);
+    const dim3 num_blocks((ne00 + 2*CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / (2*CUDA_DEQUANTIZE_BLOCK_SIZE),
+                          (int)std::min(ne01, (int64_t)65535),
+                          (int)std::min(ne0203, (int64_t)65535));
+    dequantize_block_tq_kv_4b_uniform<dst_t><<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>
+        (vx, y, ne00, ne01, ne0203, ne02_fdv, s01, s02, s03);
+}
+
+static void dequantize_block_tq_kv_4b_uniform_f16_nc(const void * vx, half * y,
+        int64_t ne00, int64_t ne01, int64_t ne02, int64_t ne03,
+        int64_t s01, int64_t s02, int64_t s03, cudaStream_t stream) {
+    dequantize_block_tq_kv_4b_uniform_nc<half>(vx, y, ne00, ne01, ne02, ne03, s01, s02, s03, stream);
+}
+
 template <int qk, int qr, dequantize_kernel_t dequantize_kernel, typename dst_t>
 static __global__ void dequantize_block(const void * __restrict__ vx, dst_t * __restrict__ y,
         const int64_t ne00, const int64_t ne01,
@@ -765,8 +843,7 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
             // TQ_KV_1B requires complex RHT inverse transform, use CPU fallback
             return nullptr;
         case GGML_TYPE_TQ_KV_4B_UNIFORM:
-            // TQ_KV_4B_UNIFORM: use CPU fallback for consistency
-            return nullptr;
+            return dequantize_row_tq_kv_4b_uniform_f16_cuda;
         case GGML_TYPE_F32:
             return convert_unary_cont_cuda<float>;
         case GGML_TYPE_BF16:
@@ -828,8 +905,7 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
             // TQ_KV_1B requires complex RHT inverse transform, use CPU fallback
             return nullptr;
         case GGML_TYPE_TQ_KV_4B_UNIFORM:
-            // TQ_KV_4B_UNIFORM: use CPU fallback for consistency
-            return nullptr;
+            return dequantize_row_tq_kv_4b_uniform_cuda<float>;
         case GGML_TYPE_F16:
             return convert_unary_cont_cuda<half>;
         case GGML_TYPE_BF16:
